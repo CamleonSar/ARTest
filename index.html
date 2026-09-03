@@ -3,131 +3,145 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>RA - Fondo de Cámara Corregido</title>
+  <title>RA - Anclaje Espacial y Perspectiva Real</title>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: sans-serif; touch-action: none; }
     
-    /* Video de fondo para cámaras sin WebXR nativo (iOS / Safari) */
-    #webcam {
-      position: absolute;
-      top: 0; left: 0; width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 1;
-    }
+    /* Video de fondo (Fallback para cuando no hay RA activa) */
+    #webcam { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; display: block; }
     
-    /* Renderizador 3D transparente superpuesto */
-    canvas {
-      position: absolute;
-      top: 0; left: 0;
-      z-index: 2;
-      pointer-events: auto;
-    }
+    canvas { position: absolute; top: 0; left: 0; z-index: 2; pointer-events: auto; }
 
-    #ui {
-      position: absolute;
-      top: 15px; left: 50%;
-      transform: translateX(-50%);
-      z-index: 100;
-      display: flex; gap: 10px;
-    }
-    .btn {
-      background: #007bff; color: white;
-      padding: 10px 18px; border: none; border-radius: 20px;
-      font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
+    #ui { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 10px; align-items: center; width: 90%; }
+    
+    .btn { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 25px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-size: 16px; text-align: center; }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    
     input[type="file"] { display: none; }
-    #info {
-      position: absolute; bottom: 20px; width: 100%;
-      text-align: center; color: white; background: rgba(0,0,0,0.6);
-      padding: 8px 0; font-size: 14px; z-index: 100; pointer-events: none;
-    }
+    
+    #info { position: absolute; bottom: 20px; width: 100%; text-align: center; color: white; background: rgba(0,0,0,0.7); padding: 10px 0; font-size: 14px; z-index: 100; pointer-events: none; }
   </style>
+  <!-- Three.js principal -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
 
+  <!-- Video para el fondo cuando la RA no está activa -->
   <video id="webcam" autoplay playsinline muted></video>
 
   <div id="ui">
-    <label class="btn" for="cameraInput">📷 Capturar Hoja</label>
+    <label class="btn" for="cameraInput" id="captureBtn">1. Capturar Hoja Carta</label>
     <input type="file" id="cameraInput" accept="image/*" capture="environment">
+    <div class="btn" id="placeBtn" style="display:none; background: #28a745;">2. Tocar superficie para ubicar</div>
   </div>
 
-  <div id="info">1 dedo: Mover | 2 dedos: Cambiar tamaño</div>
+  <div id="info">Primero captura la hoja. Luego, si estás en modo RA, escanea el suelo y toca para ubicar.</div>
 
   <script type="module">
     import { ARButton } from 'https://unpkg.com/three@0.128.0/examples/jsm/webxr/ARButton.js';
 
     let camera, scene, renderer;
+    let controller; // Para gestionar toques en RA
+    let reticle; // Indicador visual de superficie detectada
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+    
     let objects = [];
-    let selectedObject = null;
-    let initialPinchDistance = null;
-    let initialScale = null;
-    let previousTouchPosition = { x: 0, y: 0 };
+    let latestTexture = null;
+    let currentSession = null;
 
     init();
 
     async function init() {
+      // --- Configuración Básica de Three.js ---
       scene = new THREE.Scene();
-      scene.background = null; // Fuerza la transparencia del fondo en la escena
+      scene.background = null; 
 
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-      camera.position.set(0, 0, 1);
-
-      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
+      
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2); // Luz ambiental brillante
       scene.add(light);
+
+      // Luz direccional para proyectar sombras/relieves sutiles
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+      dirLight.position.set(1, 2, 1);
+      scene.add(dirLight);
 
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setClearColor(0x000000, 0); // Canal alfa en 0 para transparencia total
+      renderer.setClearColor(0x000000, 0); 
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // 1. Iniciar transmisión de video de cámara en vivo para navegadores móviles
-      await startWebcam();
+      // --- Fallback de Cámara de Video (iOS/Safari) ---
+      await startFallbackWebcam();
 
-      // 2. Integrar WebXR para dispositivos compatibles (ej. Chrome en Android)
+      // --- Configuración de WebXR y Anclaje Espacial (Hit Test) ---
       if ('xr' in navigator) {
         navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
           if (supported) {
-            const arBtn = ARButton.createButton(renderer, { requiredFeatures: [] });
+            // Requerimos 'hit-test' para detectar superficies reales
+            const arBtn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
             document.body.appendChild(arBtn);
             
-            renderer.xr.addEventListener('sessionstart', () => {
-              document.getElementById('webcam').style.display = 'none';
-            });
-            renderer.xr.addEventListener('sessionend', () => {
-              document.getElementById('webcam').style.display = 'block';
-            });
+            renderer.xr.addEventListener('sessionstart', onSessionStart);
+            renderer.xr.addEventListener('sessionend', onSessionEnd);
+          } else {
+            updateInfo("WebXR AR no soportado. Verás los objetos flotando en 3D.");
           }
         });
       }
 
+      // --- Retículo (Indicador de superficie detectada) ---
+      // Es un aro que sigue el plano detectado en el suelo/mesa
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0x28a745, opacity: 0.8, transparent: true })
+      );
+      reticle.matrixAutoUpdate = false; // El motor de RA actualizará la matriz directamente
+      reticle.visible = false;
+      scene.add(reticle);
+
+      // --- Controladores de Interacción ---
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onPlaceObject); // 'select' es un toque en pantalla en RA
+      scene.add(controller);
+
+      // --- Eventos de UI ---
       document.getElementById('cameraInput').addEventListener('change', processImage);
-      window.addEventListener('touchstart', onTouchStart, { passive: false });
-      window.addEventListener('touchmove', onTouchMove, { passive: false });
-      window.addEventListener('touchend', () => { initialPinchDistance = null; });
       window.addEventListener('resize', onWindowResize);
 
       animate();
     }
 
-    async function startWebcam() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: "environment" } }
-        });
-        document.getElementById('webcam').srcObject = stream;
-      } catch (err) {
-        try {
-          const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
-          document.getElementById('webcam').srcObject = fallbackStream;
-        } catch (e) {
-          console.warn("No se pudo acceder a la cámara en vivo:", e);
-        }
+    // --- Funciones de RA y Sesión ---
+
+    function onSessionStart() {
+      currentSession = renderer.xr.getSession();
+      document.getElementById('webcam').style.display = 'none'; // Ocultar video fallback
+      hitTestSourceRequested = false;
+      hitTestSource = null;
+      updateInfo("Escanea superficies (suelo/mesa) hasta ver el aro verde.");
+    }
+
+    function onSessionEnd() {
+      currentSession = null;
+      document.getElementById('webcam').style.display = 'block'; // Mostrar video fallback
+      reticle.visible = false;
+      document.getElementById('placeBtn').style.display = 'none';
+      document.getElementById('captureBtn').style.display = 'block';
+      updateInfo("Sesión RA finalizada.");
+    }
+
+    // Al tocar la pantalla en RA
+    function onPlaceObject() {
+      if (reticle.visible && latestTexture) {
+        add3DObjectAtReticle();
       }
     }
+
+    // --- Procesamiento de Imagen y Creación de Objeto ---
 
     function processImage(event) {
       const file = event.target.files[0];
@@ -139,67 +153,125 @@
         img.onload = function() {
           const texture = new THREE.Texture(img);
           texture.needsUpdate = true;
-          add3DObject(texture);
+          latestTexture = texture;
+          
+          // Preparar UI para ubicación
+          document.getElementById('captureBtn').style.display = 'none';
+          document.getElementById('placeBtn').style.display = 'block';
+          updateInfo("Imagen cargada. Si estás en RA, busca el aro verde y toca la pantalla.");
+          
+          // Si no hay RA activa (ej. PC o iOS Safari), ubicar automáticamente frente a cámara
+          if (!currentSession) {
+            add3DObjectFallback(texture);
+          }
         };
         img.src = e.target.result;
       };
       reader.readAsDataURL(file);
     }
 
-    function add3DObject(texture) {
-      const geometry = new THREE.BoxGeometry(0.25, 0.25, 0.25);
-      const material = new THREE.MeshStandardMaterial({ map: texture });
+    // Ubicar objeto en la posición real detectada por el retículo
+    function add3DObjectAtReticle() {
+      // Proporciones Carta (8.5x11 in -> aprox 0.216m x 0.279m)
+      // Usamos una caja muy delgada para simular papel con relieve
+      const geometry = new THREE.BoxGeometry(0.216, 0.279, 0.01);
+      const material = new THREE.MeshStandardMaterial({ map: latestTexture, metalness: 0.1, roughness: 0.8 });
       const mesh = new THREE.Mesh(geometry, material);
 
-      mesh.position.set((Math.random() - 0.5) * 0.2, 0, -0.5);
+      // Copiar posición y orientación (ángulo/perspectiva) del plano real detectado
+      mesh.position.setFromMatrixPosition(reticle.matrix);
+      mesh.quaternion.setFromMatrixRotation(reticle.matrix);
+      
+      // Ajuste leve: levantar el papel 5mm sobre la superficie para que no parpadee (z-fighting)
+      mesh.translateY(0.005); 
+
       scene.add(mesh);
       objects.push(mesh);
-      selectedObject = mesh;
+      
+      // Resetear UI
+      latestTexture = null;
+      document.getElementById('placeBtn').style.display = 'none';
+      document.getElementById('captureBtn').style.display = 'block';
+      updateInfo("Objeto ubicado. ¡Vuelve a capturar para sumar otro!");
     }
 
-    function onTouchStart(e) {
-      if (!selectedObject) return;
-      if (e.touches.length === 1) {
-        previousTouchPosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      } else if (e.touches.length === 2) {
-        initialPinchDistance = Math.hypot(
-          e.touches[0].clientX - e.touches[1].clientX,
-          e.touches[0].clientY - e.touches[1].clientY
-        );
-        initialScale = selectedObject.scale.x;
+    // Fallback: Ubicar flotando si no hay RA real
+    function add3DObjectFallback(texture) {
+      const geometry = new THREE.BoxGeometry(0.216, 0.279, 0.01);
+      const material = new THREE.MeshStandardMaterial({ map: texture });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set((Math.random() - 0.5) * 0.2, 0, -0.6);
+      scene.add(mesh);
+      objects.push(mesh);
+      latestTexture = null;
+      document.getElementById('placeBtn').style.display = 'none';
+      document.getElementById('captureBtn').style.display = 'block';
+    }
+
+    // --- Bucle de Animación y Renderizado ---
+
+    function animate() {
+      renderer.setAnimationLoop(render);
+    }
+
+    function render(timestamp, frame) {
+      // 1. Manejo del Hit Test (Detección de superficies) en cada frame de RA
+      if (frame && currentSession) {
+        // Solicitar el source de hit test una vez iniciada la sesión
+        if (hitTestSourceRequested === false) {
+          currentSession.requestReferenceSpace('viewer').then((referenceSpace) => {
+            currentSession.requestHitTestSource({ space: referenceSpace }).then((source) => {
+              hitTestSource = source;
+            });
+          });
+          session.requestReferenceSpace('local').then((space) => {
+            localReferenceSpace = space;
+          });
+          hitTestSourceRequested = true;
+        }
+
+        // Si tenemos source, buscar impactos en planos reales
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length > 0) {
+            const hit = hitTestResults[0];
+            // Obtener la pose (posición y orientación) relativa al espacio local
+            const pose = hit.getPose(renderer.xr.getReferenceSpace());
+            
+            reticle.visible = true;
+            // Aplicar la pose real directamente a la matriz del retículo
+            reticle.matrix.fromArray(pose.transform.matrix);
+          } else {
+            reticle.visible = false;
+          }
+        }
       }
+
+      // 2. Movimiento de Rotación Sutil en los objetos
+      objects.forEach(obj => {
+        // Rotación muy lenta y suave en el eje Y (vertical relativo al objeto)
+        obj.rotation.y += 0.005; 
+      });
+
+      // 3. Renderizar escena
+      renderer.render(scene, camera);
     }
 
-    function onTouchMove(e) {
-      if (!selectedObject) return;
-      e.preventDefault();
+    // --- Funciones Auxiliares ---
 
-      if (e.touches.length === 1) {
-        const deltaX = (e.touches[0].clientX - previousTouchPosition.x) * 0.002;
-        const deltaY = (e.touches[0].clientY - previousTouchPosition.y) * 0.002;
-        selectedObject.position.x += deltaX;
-        selectedObject.position.y -= deltaY;
-        previousTouchPosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      } else if (e.touches.length === 2 && initialPinchDistance) {
-        const dist = Math.hypot(
-          e.touches[0].clientX - e.touches[1].clientX,
-          e.touches[0].clientY - e.touches[1].clientY
-        );
-        const scale = Math.max(0.05, Math.min(initialScale * (dist / initialPinchDistance), 3));
-        selectedObject.scale.set(scale, scale, scale);
-      }
+    async function startFallbackWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: "environment" } } });
+        document.getElementById('webcam').srcObject = stream;
+      } catch (err) { /* Ignorar error de cámara si no hay trasera */ }
     }
+
+    function updateInfo(text) { document.getElementById('info').innerText = text; }
 
     function onWindowResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    function animate() {
-      renderer.setAnimationLoop(() => {
-        renderer.render(scene, camera);
-      });
     }
   </script>
 </body>
