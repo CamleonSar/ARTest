@@ -3,15 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>RA - Detección de Plano y Múltiples Objetos</title>
+  <title>RA Multiplataforma (iOS & Android)</title>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: sans-serif; touch-action: none; }
+    
+    /* Fondo de cámara en vivo para iPhone y navegadores sin WebXR */
     #webcam { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    
+    /* Lienzo WebGL superpuesto */
     canvas { position: absolute; top: 0; left: 0; z-index: 2; pointer-events: auto; }
+
     #ui { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 10px; align-items: center; width: 90%; }
+    
     .btn { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 25px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-size: 16px; text-align: center; }
+    
     input[type="file"] { display: none; }
-    #info { position: absolute; bottom: 80px; width: 100%; text-align: center; color: white; background: rgba(0,0,0,0.7); padding: 10px 0; font-size: 14px; z-index: 100; pointer-events: none; }
+    
+    #info { position: absolute; bottom: 80px; width: 100%; text-align: center; color: white; background: rgba(0,0,0,0.75); padding: 10px 15px; font-size: 13px; z-index: 100; pointer-events: none; box-sizing: border-box; }
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
@@ -22,10 +30,10 @@
   <div id="ui">
     <label class="btn" for="cameraInput" id="captureBtn">1. Capturar Hoja Carta</label>
     <input type="file" id="cameraInput" accept="image/*" capture="environment">
-    <div class="btn" id="placeBtn" style="display:none; background: #28a745;">2. Tocar pantalla para colocar</div>
+    <div class="btn" id="placeBtn" style="display:none; background: #28a745;">2. Tocar para colocar objeto</div>
   </div>
 
-  <div id="info">1. Toma la foto | 2. Toca "START AR" abajo | 3. Mueve la cámara apuntando al suelo</div>
+  <div id="info">Iniciando cámara...</div>
 
   <script type="module">
     import { ARButton } from 'https://unpkg.com/three@0.128.0/examples/jsm/webxr/ARButton.js';
@@ -44,6 +52,7 @@
     async function init() {
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      camera.position.set(0, 0, 1);
 
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2);
       scene.add(light);
@@ -55,21 +64,14 @@
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setClearColor(0x000000, 0);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Inserción directa del botón AR (Muestra estado de compatibilidad directamente)
-      const arButton = ARButton.createButton(renderer, { 
-        requiredFeatures: ['hit-test'] 
-      });
-      document.body.appendChild(arButton);
+      // Iniciar cámara trasera para iPhone / Fallback
+      await startWebcam();
 
-      renderer.xr.addEventListener('sessionstart', onSessionStart);
-      renderer.xr.addEventListener('sessionend', onSessionEnd);
-
-      await startFallbackWebcam();
-
-      // Marcador de superficie detectada (Aro verde)
+      // Marcador de piso para WebXR
       reticle = new THREE.Mesh(
         new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide })
@@ -78,14 +80,53 @@
       reticle.visible = false;
       scene.add(reticle);
 
+      // Verificación de WebXR segura para iOS
+      if ('xr' in navigator) {
+        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+          if (supported) {
+            const arBtn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+            document.body.appendChild(arBtn);
+
+            renderer.xr.addEventListener('sessionstart', onSessionStart);
+            renderer.xr.addEventListener('sessionend', onSessionEnd);
+            updateInfo("Android WebXR activo. Usa 'START AR' o captura directamente.");
+          } else {
+            setupiOSFallback();
+          }
+        }).catch(() => setupiOSFallback());
+      } else {
+        setupiOSFallback();
+      }
+
       controller = renderer.xr.getController(0);
-      controller.addEventListener('select', onPlaceObject);
+      controller.addEventListener('select', onPlaceObjectXR);
       scene.add(controller);
 
       document.getElementById('cameraInput').addEventListener('change', processImage);
+      document.getElementById('placeBtn').addEventListener('click', onPlaceObjectFallback);
       window.addEventListener('resize', onWindowResize);
 
       animate();
+    }
+
+    function setupiOSFallback() {
+      updateInfo("Modo Cámara Activo (iPhone / Safari). Captura la imagen para colocarla.");
+    }
+
+    async function startWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: "environment" } }
+        });
+        document.getElementById('webcam').srcObject = stream;
+      } catch (err) {
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          document.getElementById('webcam').srcObject = fallbackStream;
+        } catch (e) {
+          updateInfo("Error al acceder a la cámara. Permite el acceso en la configuración.");
+        }
+      }
     }
 
     function onSessionStart() {
@@ -93,6 +134,7 @@
       document.getElementById('webcam').style.display = 'none';
       hitTestSourceRequested = false;
       hitTestSource = null;
+      updateInfo("Mueve la cámara apuntando al suelo hasta ver el aro verde.");
     }
 
     function onSessionEnd() {
@@ -101,12 +143,7 @@
       reticle.visible = false;
       hitTestSourceRequested = false;
       hitTestSource = null;
-    }
-
-    function onPlaceObject() {
-      if (reticle.visible && latestTexture) {
-        add3DObjectAtReticle();
-      }
+      updateInfo("Sesión de AR finalizada.");
     }
 
     function processImage(event) {
@@ -125,7 +162,7 @@
           document.getElementById('placeBtn').style.display = 'block';
 
           if (!currentSession) {
-            add3DObjectFallback(texture);
+            updateInfo("Imagen lista. Toca el botón verde para proyectarla.");
           }
         };
         img.src = e.target.result;
@@ -133,34 +170,48 @@
       reader.readAsDataURL(file);
     }
 
-    function add3DObjectAtReticle() {
-      // Dimensiones proporcionales a una hoja carta (0.216m x 0.279m)
+    // Ubicación en WebXR (Android / ARCore)
+    function onPlaceObjectXR() {
+      if (reticle.visible && latestTexture) {
+        create3DObject(reticle.matrix, true);
+      }
+    }
+
+    // Ubicación en iPhone (Visor 3D en vivo sobre cámara)
+    function onPlaceObjectFallback() {
+      if (!latestTexture) return;
+
+      const matrix = new THREE.Matrix4();
+      const position = new THREE.Vector3(
+        (Math.random() - 0.5) * 0.15,
+        (Math.random() - 0.5) * 0.15,
+        -0.6
+      );
+      matrix.setPosition(position);
+      
+      create3DObject(matrix, false);
+    }
+
+    function create3DObject(matrix, isXR) {
       const geometry = new THREE.BoxGeometry(0.216, 0.279, 0.01);
       const material = new THREE.MeshStandardMaterial({ map: latestTexture, metalness: 0.1, roughness: 0.8 });
       const mesh = new THREE.Mesh(geometry, material);
 
-      mesh.position.setFromMatrixPosition(reticle.matrix);
-      mesh.quaternion.setFromMatrixRotation(reticle.matrix);
-      mesh.position.y += 0.005;
+      if (isXR) {
+        mesh.position.setFromMatrixPosition(matrix);
+        mesh.quaternion.setFromMatrixRotation(matrix);
+        mesh.position.y += 0.005;
+      } else {
+        mesh.position.setFromMatrixPosition(matrix);
+      }
 
       scene.add(mesh);
       objects.push(mesh);
-      
-      latestTexture = null;
-      document.getElementById('placeBtn').style.display = 'none';
-      document.getElementById('captureBtn').style.display = 'block';
-    }
 
-    function add3DObjectFallback(texture) {
-      const geometry = new THREE.BoxGeometry(0.216, 0.279, 0.01);
-      const material = new THREE.MeshStandardMaterial({ map: texture });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set((Math.random() - 0.5) * 0.2, 0, -0.6);
-      scene.add(mesh);
-      objects.push(mesh);
       latestTexture = null;
       document.getElementById('placeBtn').style.display = 'none';
       document.getElementById('captureBtn').style.display = 'block';
+      updateInfo("Objeto ubicado en el espacio. Puedes capturar otra hoja.");
     }
 
     function animate() {
@@ -201,19 +252,12 @@
         }
       }
 
-      // Rotación suave continua en eje Y
+      // Rotación suave continua del objeto en 360 grados
       objects.forEach(obj => {
         obj.rotation.y += 0.005;
       });
 
       renderer.render(scene, camera);
-    }
-
-    async function startFallbackWebcam() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: "environment" } } });
-        document.getElementById('webcam').srcObject = stream;
-      } catch (err) {}
     }
 
     function onWindowResize() {
