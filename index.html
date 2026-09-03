@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>RA - Detección de Suelo Corregida</title>
+  <title>RA - Detección de Plano y Múltiples Objetos</title>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: sans-serif; touch-action: none; }
     #webcam { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
     canvas { position: absolute; top: 0; left: 0; z-index: 2; pointer-events: auto; }
     #ui { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 10px; align-items: center; width: 90%; }
-    .btn { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 25px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-size: 16px; }
+    .btn { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 25px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-size: 16px; text-align: center; }
     input[type="file"] { display: none; }
-    #info { position: absolute; bottom: 20px; width: 100%; text-align: center; color: white; background: rgba(0,0,0,0.7); padding: 10px 0; font-size: 14px; z-index: 100; pointer-events: none; }
+    #info { position: absolute; bottom: 80px; width: 100%; text-align: center; color: white; background: rgba(0,0,0,0.7); padding: 10px 0; font-size: 14px; z-index: 100; pointer-events: none; }
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
@@ -25,7 +25,7 @@
     <div class="btn" id="placeBtn" style="display:none; background: #28a745;">2. Tocar pantalla para colocar</div>
   </div>
 
-  <div id="info">Entra a "START AR", mueve suavemente la cámara apuntando al suelo.</div>
+  <div id="info">1. Toma la foto | 2. Toca "START AR" abajo | 3. Mueve la cámara apuntando al suelo</div>
 
   <script type="module">
     import { ARButton } from 'https://unpkg.com/three@0.128.0/examples/jsm/webxr/ARButton.js';
@@ -58,21 +58,18 @@
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
+      // Inserción directa del botón AR (Muestra estado de compatibilidad directamente)
+      const arButton = ARButton.createButton(renderer, { 
+        requiredFeatures: ['hit-test'] 
+      });
+      document.body.appendChild(arButton);
+
+      renderer.xr.addEventListener('sessionstart', onSessionStart);
+      renderer.xr.addEventListener('sessionend', onSessionEnd);
+
       await startFallbackWebcam();
 
-      if ('xr' in navigator) {
-        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
-          if (supported) {
-            const arBtn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
-            document.body.appendChild(arBtn);
-
-            renderer.xr.addEventListener('sessionstart', onSessionStart);
-            renderer.xr.addEventListener('sessionend', onSessionEnd);
-          }
-        });
-      }
-
-      // Marcador de posición (Aro Verde)
+      // Marcador de superficie detectada (Aro verde)
       reticle = new THREE.Mesh(
         new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide })
@@ -137,6 +134,7 @@
     }
 
     function add3DObjectAtReticle() {
+      // Dimensiones proporcionales a una hoja carta (0.216m x 0.279m)
       const geometry = new THREE.BoxGeometry(0.216, 0.279, 0.01);
       const material = new THREE.MeshStandardMaterial({ map: latestTexture, metalness: 0.1, roughness: 0.8 });
       const mesh = new THREE.Mesh(geometry, material);
@@ -203,6 +201,7 @@
         }
       }
 
+      // Rotación suave continua en eje Y
       objects.forEach(obj => {
         obj.rotation.y += 0.005;
       });
